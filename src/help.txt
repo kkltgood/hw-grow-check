@@ -1,0 +1,30 @@
+hw-grow-check — 华为云开发者成长中心自动化
+
+  node src/cli.mjs login [--qr]   登录（--qr 生成二维码截图，适合无桌面环境）
+  node src/cli.mjs login --from-env  用账号密码登录（读 GROW_ACCOUNT / account.json）
+  node src/cli.mjs export-auth    导出登录态为 base64，便于拷贝到服务器
+  node src/cli.mjs import-auth    从 GROW_AUTH_B64 导入登录态
+  node src/cli.mjs run            执行启用的任务（由定时器 / 智能体调用）
+  node src/cli.mjs status         查看积分、签到、任务状态
+  node src/cli.mjs gitcode-check  检查 GitCode 令牌与两个 Star 仓库池（只读）
+  node src/cli.mjs test-notify    发一条测试告警，验证 webhook / 邮件是否通
+  node src/cli.mjs doctor         环境自检
+
+环境变量：
+  GROW_TASKS=checkin,harmony,devspace,star,star-weekly  启用任务（默认五项全开）
+  GROW_AUTH_FILE=./data/auth.json
+  GROW_HEADLESS=true
+  GROW_CHANNEL=chrome            本机复用系统 Chrome
+  GROW_NOTIFY_URL=                webhook 地址
+  GROW_NOTIFY_TYPE=generic|wecom|feishu|dingtalk|bark|serverchan
+  GROW_DATA_DIR=./data
+  GROW_GITCODE_TOKEN=             GitCode 访问令牌，用于 Star 任务
+
+配置：
+  data/account.json              统一账号配置（600 权限），按需只写用到的段：
+    mail                         {host,port,user,pass,to} 结果邮件与告警
+    gitcode                      {token,username} Star 任务用
+    huawei                       {account,password} 会话失效时自动登录
+  GROW_NOTIFY_URL + TYPE         webhook
+
+环境变量 GROW_GITCODE_TOKEN / GROW_ACCOUNT / GROW_PASSWORD 优先于 account.json。

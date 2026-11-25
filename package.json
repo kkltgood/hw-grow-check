@@ -1,0 +1,39 @@
+{
+  "name": "hw-grow-check",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "华为云开发者成长中心自动签到与每日任务自动化：签到、AI DevSpace、鸿蒙案例、GitCode Star，每日任务满分 80 分",
+  "license": "MIT",
+  "keywords": [
+    "huaweicloud",
+    "huawei-cloud",
+    "grow",
+    "checkin",
+    "auto-checkin",
+    "sign-in",
+    "daily-tasks",
+    "devspace",
+    "harmonyos",
+    "gitcode",
+    "playwright",
+    "automation",
+    "points"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "login": "node src/cli.mjs login",
+    "export-auth": "node src/cli.mjs export-auth",
+    "import-auth": "node src/cli.mjs import-auth",
+    "run": "node src/cli.mjs run",
+    "status": "node src/cli.mjs status",
+    "doctor": "node src/cli.mjs doctor",
+    "postinstall": "node -e \"console.log('提示: 无桌面环境需执行 npx playwright install --with-deps chromium')\""
+  },
+  "dependencies": {
+    "nodemailer": "^10.3.1",
+    "playwright": "^1.51.0"
+  }
+}
