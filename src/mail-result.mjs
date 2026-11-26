@@ -205,7 +205,13 @@ if (REMIND) {
     footer: footerText(`工作日 ${RUN_AT} 自动运行，周末不弹扫码窗口`),
   });
 } else if (OK) {
-  const gained = delta != null && delta > 0;
+  /**
+   * delta 是「今天全部任务」的总增量（签到 + Star + 鸿蒙 + DevSpace），
+   * 签到本身只值 perDay（从 detail 的 +N 解析，兜底取任务清单里的分值）。
+   * 以前直接拿 delta 当签到得分，会出现「签到成功 +80」但每日签到只 +10 的怪数字。
+   */
+  const signGained = checkin?.status === "signed" ? perDay || signBonus : 0;
+  const gained = signGained > 0;
   const pts = s.pointsAfter ?? "?";
 
   // 先把今天的积分补记进历史（手动 / 单独调用本脚本时也能攒数据）
@@ -233,17 +239,23 @@ if (REMIND) {
          </div>`;
 
   subject = gained
-    ? `✅ 华为云签到成功 · ${md} · +${delta}（积分 ${pts}）`
+    ? `✅ 华为云签到成功 · ${md} · +${signGained}（积分 ${pts}）`
     : `✅ 华为云签到完成 · ${md} · 今日已签（积分 ${pts}）`;
 
   const pointsText =
     s.pointsBefore != null && s.pointsAfter != null
-      ? `${s.pointsBefore} → ${s.pointsAfter}${gained ? `（+${delta}）` : "（无变化）"}`
+      ? `${s.pointsBefore} → ${s.pointsAfter}${
+          gained
+            ? delta > signGained
+              ? `（签到 +${signGained}，今日累计 +${delta}）`
+              : `（+${signGained}）`
+            : "（无变化）"
+        }`
       : String(pts);
 
   const title = gained ? "签到成功" : "今日已签到";
   const subtitle = gained
-    ? `今天这 ${delta} 分已经到账${streak ? `，已连续签到 ${streak} 天` : ""}`
+    ? `今天这 ${signGained} 分已经到账${streak ? `，已连续签到 ${streak} 天` : ""}`
     : `今天已经签过了${streak ? `，已连续签到 ${streak} 天` : ""}，没有重复加分`;
 
   const starNote = starAttention.length
@@ -258,9 +270,9 @@ if (REMIND) {
   const body = `
     <div>
       ${statPair(
-        statCard("当前积分", pts, "分", gained ? `今日 +${delta}` : "与上次记录持平"),
+        statCard("当前积分", pts, "分", delta != null && delta > 0 ? `今日累计 +${delta}` : "与上次记录持平"),
         gained
-          ? statCard("本次获得", `+${delta}`, "分", perDay ? `每日基础 +${perDay}` : "已到账", T.amber)
+          ? statCard("本次获得", `+${signGained}`, "分", `每日基础 +${signBonus}`, T.amber)
           : statCard("连续签到", streak || "—", "天", "断签会重新计数"),
       )}
     </div>
@@ -286,7 +298,7 @@ if (REMIND) {
       right: brand,
       title: title,
       subtitle: esc(subtitle),
-      badge: bandPill(gained ? `+${delta} 分` : "无变化"),
+      badge: bandPill(gained ? `+${signGained} 分` : "无变化"),
     }),
     body,
     footer: footerText(`下次执行：明天 ${RUN_AT}`),
