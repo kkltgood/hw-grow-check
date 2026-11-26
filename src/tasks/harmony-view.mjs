@@ -11,6 +11,7 @@
  */
 import { getUserTasks } from "../api.mjs";
 import { URLS } from "../config.mjs";
+import { RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "../wait.mjs";
 
 export const meta = {
   id: "harmony",
@@ -19,6 +20,8 @@ export const meta = {
   cycle: "DAILY",
   safe: false,
   note: "打开一个案例详情页并停留 40 秒",
+  // 停留 40 秒 + 最多等 5 分钟结算，外层超时留余量
+  timeoutMs: RESULT_WAIT_MS + 180_000,
 };
 
 const norm = (s) => (s || "").replace(/\s+/g, "");
@@ -101,15 +104,22 @@ export async function run({ context, page, log }) {
     await page.bringToFront().catch(() => {});
   }
 
-  // 服务端记分有延迟，最多等 90 秒
-  for (let i = 0; i < 6; i++) {
-    await page.waitForTimeout(15000);
-    const after = await getUserTasks(page).catch(() => ({ missions: [] }));
-    const m = findMission(after.missions || []);
-    if (m?.done) {
-      log?.("任务已标记完成，+10 分");
-      return { status: "signed", detail: "已完成，积分到账" };
-    }
+  // 服务端记分有延迟：等到任务状态真的翻转，最多 5 分钟，超时按失败
+  const settled = await waitForResult({
+    page,
+    log,
+    label: "鸿蒙案例任务",
+    check: async () => {
+      const after = await getUserTasks(page).catch(() => ({ missions: [] }));
+      return { done: Boolean(findMission(after.missions || [])?.done) };
+    },
+  });
+  if (settled.ok) {
+    log?.("任务已标记完成，+10 分");
+    return { status: "signed", detail: "已完成，积分到账" };
   }
-  return { status: "pending", detail: "已浏览案例 40 秒，但任务状态未变为已完成（服务端可能有延迟）" };
+  return {
+    status: "failed",
+    detail: `已浏览案例 40 秒，但 ${WAIT_MINUTES} 分钟内任务状态未变为已完成，按失败计`,
+  };
 }

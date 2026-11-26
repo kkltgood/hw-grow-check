@@ -13,9 +13,11 @@ import { join } from "node:path";
 import { getUserTasks } from "./api.mjs";
 import { config } from "./config.mjs";
 import { getGitcodeUser, listStarredRepos, readGitcodeConfig, starRepo } from "./gitcode.mjs";
+import { RESULT_POLL_MS, RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "./wait.mjs";
 
-const POLL_INTERVAL_MS = 10_000;
-const SETTLE_TIMEOUT_MS = 180_000;
+const POLL_INTERVAL_MS = RESULT_POLL_MS;
+/** Star 之后要等成长中心的外部校验，最多 5 分钟，超时按失败返回 */
+const SETTLE_TIMEOUT_MS = RESULT_WAIT_MS;
 const norm = (s) => (s || "").replace(/\s+/g, "");
 
 /** 周期键：日任务用 YYYY-MM-DD，周任务用本周周一的日期 */
@@ -152,11 +154,35 @@ export async function runStarTask({ page, log, task, loadPool }) {
     log?.(`无法读取令牌账号（${String(e).replace(/^Error:\s*/, "").slice(0, 100)}），继续尝试 Star`);
   }
 
+  /**
+   * 等成长中心把任务标记完成。Star 只是把仓库加到了 GitCode，
+   * 分数要等平台的外部校验跑完才到账，所以必须等到状态翻转，最多 5 分钟。
+   */
+  const settle = () =>
+    waitForResult({
+      page,
+      log,
+      label: `${task.title}结算`,
+      timeoutMs: SETTLE_TIMEOUT_MS,
+      intervalMs: POLL_INTERVAL_MS,
+      check: async () => {
+        const after = await getUserTasks(page).catch(() => ({ missions: [] }));
+        return { done: Boolean(findMission(after.missions, task)?.done) };
+      },
+    });
+
   const state = readState(file);
   if (state.pending?.repo && state.pending.period === period) {
+    log?.(`${periodName}已 Star ${state.pending.repo}，等成长中心补确认（最多 ${WAIT_MINUTES} 分钟）`);
+    const r = await settle();
+    if (r.ok) {
+      writeState(file, { pending: null, last: { ...state.pending, settled: true } });
+      log?.(`上一条 Star 已结算，+${task.bonus} 分`);
+      return { status: "signed", detail: `${periodName}已 Star ${state.pending.repo}，+${task.bonus} 分（补确认成功）` };
+    }
     return {
-      status: "pending",
-      detail: `${periodName}已 Star ${state.pending.repo}，成长中心尚未同步，不重复 Star`,
+      status: "failed",
+      detail: `${periodName}已 Star ${state.pending.repo}，但 ${WAIT_MINUTES} 分钟内成长中心仍未确认，按失败计；不会重复 Star`,
     };
   }
 
@@ -206,22 +232,18 @@ export async function runStarTask({ page, log, task, loadPool }) {
   });
   log?.(`已 Star ${pick.fullName}（${pick.title}）→ ${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}`);
 
-  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(POLL_INTERVAL_MS);
-    const after = await getUserTasks(page).catch(() => ({ missions: [] }));
-    if (findMission(after.missions, task)?.done) {
-      writeState(file, { pending: null, last: { ...readState(file).pending, settled: true } });
-      log?.(`任务已标记完成，+${task.bonus} 分`);
-      return {
-        status: "signed",
-        detail: `已 Star ${pick.fullName}，+${task.bonus} 分（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}）`,
-      };
-    }
+  const settled = await settle();
+  if (settled.ok) {
+    writeState(file, { pending: null, last: { ...readState(file).pending, settled: true } });
+    log?.(`任务已标记完成，+${task.bonus} 分`);
+    return {
+      status: "signed",
+      detail: `已 Star ${pick.fullName}，+${task.bonus} 分（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}）`,
+    };
   }
 
   return {
-    status: "pending",
-    detail: `已 Star ${pick.fullName}（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}），成长中心外部校验尚未同步；${periodName}不会重复 Star`,
+    status: "failed",
+    detail: `已 Star ${pick.fullName}（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}），但 ${WAIT_MINUTES} 分钟内成长中心未确认，按失败计；${periodName}不会重复 Star`,
   };
 }

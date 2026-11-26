@@ -23,6 +23,7 @@ import { ROOT, config } from "./config.mjs";
 import { mailConfigured, sendMail } from "./mail.mjs";
 import { recentSeries, recordPoints } from "./points-history.mjs";
 import { renderPointsChart } from "./chart.mjs";
+import { WAIT_MINUTES } from "./wait.mjs";
 import {
   T,
   band,
@@ -319,12 +320,32 @@ if (REMIND) {
   const loginIssue = ["1", "3", "4"].includes(CODE);
   const needScan = loginIssue; // 只有登录类问题才需要重新扫码
 
-  const fail = platformIssue
+  /**
+   * 退出码 2 不再等于「签到失败」：Star / 鸿蒙 / DevSpace 超时也会是 2。
+   * 签到本身成功、只是别的任务没等到确认时，邮件不能说成「签到失败」。
+   */
+  const checkinOk = Boolean(todayState && checkin && ["signed", "already"].includes(checkin.status));
+  const failedTasks = todayState ? (s.results || []).filter((r) => r.status === "failed") : [];
+  const otherTasks = checkinOk && failedTasks.length > 0;
+  const retryIds = failedTasks.map((r) => r.id).filter(Boolean);
+
+  const fail = otherTasks
+    ? {
+        tone: "warn",
+        title: "签到成功，任务没确认",
+        badge: "任务待确认",
+        subtitle: `${failedTasks.map((r) => r.title).join("、")} 没在 ${WAIT_MINUTES} 分钟内等到成长中心确认；签到本身已成功，${signBonus} 分已到账`,
+        stage: failedTasks[0].title,
+        session: "正常",
+        sessionColor: T.green,
+        subject: `⚠️ 华为云签到成功 · ${md} · ${failedTasks.length} 个任务未确认`,
+      }
+    : platformIssue
     ? {
         tone: "warn",
         title: "签到没成功",
         badge: "平台临时异常",
-        subtitle: `${humanize(apiDetail)}；不用重新登录，等平台缓过来补一次就行`,
+        subtitle: `${humanize(apiDetail)}；已连续重试 ${WAIT_MINUTES} 分钟仍未恢复，不用重新登录，过一会儿补一次就行`,
         stage: "签到接口（平台侧异常）",
         session: "正常",
         sessionColor: T.green,
@@ -362,11 +383,30 @@ if (REMIND) {
   lines = [
     `原因：${fail.subtitle}`,
     `时间：${day} ${hhmm}（${weekday}）`,
-    `影响：今天这 ${signBonus} 分还没到账`,
-    `处理：${needScan ? `本机执行 ${DAILY_CMD} 扫码补签` : `重跑签到：${RETRY_CMD}`}`,
+    otherTasks
+      ? `影响：签到分已到账，这 ${failedTasks.length} 项还没确认：${failedTasks.map((r) => r.title).join("、")}`
+      : `影响：今天这 ${signBonus} 分还没到账`,
+    `处理：${
+      otherTasks
+        ? `重跑未确认的任务：cd "${ROOT}" && GROW_TASKS=${retryIds.join(",")} node src/cli.mjs run`
+        : needScan
+          ? `本机执行 ${DAILY_CMD} 扫码补签`
+          : `重跑签到：${RETRY_CMD}`
+    }`,
   ];
 
-  const fixBlock = needScan
+  const fixBlock = otherTasks
+    ? notice(
+        T.orange,
+        "怎么补（约 10 秒，不用扫码）",
+        `签到已经完成，只有上面这项还在等平台确认。重跑这些任务即可：<br>
+         <code style="${codeStyle}">cd &quot;${esc(ROOT)}&quot;<br>GROW_TASKS=${esc(
+           retryIds.join(","),
+         )} node src/cli.mjs run</code>
+         <span style="display:block;margin-top:7px;color:${T.muted}">已经 Star 过的仓库不会重复 Star，只会再等一次确认。</span>`,
+        { bg: T.orangeBg },
+      )
+    : needScan
     ? notice(
         T.red,
         "怎么补（要扫一次码）",
@@ -387,18 +427,22 @@ if (REMIND) {
   const body = `
     <div>
       ${statPair(
-        statCard("签到得分", "0", `/ ${signBonus} 分`, "今天这次没加上", T.red),
+        otherTasks
+          ? statCard("签到得分", `+${signBonus}`, "分", "已到账", T.amber)
+          : statCard("签到得分", "0", `/ ${signBonus} 分`, "今天这次没加上", T.red),
         statCard(
           "当前积分",
           s.pointsAfter ?? "?",
           "分",
           !todayState
             ? "上次记录，今天没取到最新"
-            : delta != null && delta > 0
-              ? `其他任务 +${delta} 已到账`
-              : s.pointsAfter != null
-                ? "最近记录"
-                : "暂无数据",
+            : otherTasks
+              ? `签到 +${signBonus} 已计入`
+              : delta != null && delta > 0
+                ? `其他任务 +${delta} 已到账`
+                : s.pointsAfter != null
+                  ? "最近记录"
+                  : "暂无数据",
         ),
       )}
     </div>

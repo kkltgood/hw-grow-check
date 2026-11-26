@@ -6,11 +6,12 @@
  *   - 点「前往AI DevSpace实践」→ POST /api/track/aishell_click（这个才是任务完成信号）
  *
  * 所以流程是「打开页面 → 点入口 → 等埋点 200 → 回查任务状态」。
- * 埋点成功不等于立刻结算，后面再轮询 3 分钟；失败只算 pending，不算整体失败，
- * 避免一个可选任务把签到结果带成退出码 2。
+ * 埋点成功不等于立刻结算，后面最多等 5 分钟；超时按失败返回，
+ * 不再用 pending 含糊过去（页面上找不到入口这类前置问题仍记 pending）。
  */
 import { getUserTasks } from "../api.mjs";
 import { URLS } from "../config.mjs";
+import { RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "../wait.mjs";
 
 export const meta = {
   id: "devspace",
@@ -20,8 +21,8 @@ export const meta = {
   cycle: "DAILY",
   safe: false,
   note: "打开实践中心并点击「前往AI DevSpace实践」，等埋点上报后回查任务状态",
-  // 埋点后要等结算，允许本任务超过默认的 120 秒
-  timeoutMs: 300_000,
+  // 埋点后最多等 5 分钟结算，外层超时留余量
+  timeoutMs: RESULT_WAIT_MS + 90_000,
 };
 
 const norm = (s) => (s || "").replace(/\s+/g, "");
@@ -37,9 +38,6 @@ function findMission(missions, title) {
 }
 
 const ENTRY_LABELS = ["前往AI DevSpace实践", "前往 AI DevSpace", "进入AI DevSpace", "AI DevSpace"];
-/** 埋点上报成功后，服务端结算可能还有延迟；最多再等 3 分钟 */
-const SETTLE_TIMEOUT_MS = 180_000;
-const POLL_INTERVAL_MS = 10_000;
 
 export async function run({ context, page, log }) {
   const before = await getUserTasks(page).catch(() => ({ missions: [] }));
@@ -100,22 +98,25 @@ export async function run({ context, page, log }) {
     await tab.close().catch(() => {});
   }
 
-  // 回查任务状态（服务端可能有延迟）
-  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(POLL_INTERVAL_MS);
-    const after = await getUserTasks(page).catch(() => ({ missions: [] }));
-    const m = findMission(after.missions, meta.title);
-    if (m?.done) {
-      log?.("任务已标记完成，+30 分");
-      return { status: "signed", detail: "已完成，积分到账" };
-    }
+  // 回查任务状态：等到真的翻转，最多 5 分钟，超时按失败
+  const settled = await waitForResult({
+    page,
+    log,
+    label: "AI DevSpace 任务",
+    check: async () => {
+      const after = await getUserTasks(page).catch(() => ({ missions: [] }));
+      return { done: Boolean(findMission(after.missions || [], meta.title)?.done) };
+    },
+  });
+  if (settled.ok) {
+    log?.("任务已标记完成，+30 分");
+    return { status: "signed", detail: "已完成，积分到账" };
   }
 
   return {
-    status: "pending",
+    status: "failed",
     detail: clickReported
-      ? "埋点已上报，但 3 分钟内任务状态未变为已完成"
-      : "已尝试点击入口，但未捕获埋点上报，任务状态未完成",
+      ? `埋点已上报，但 ${WAIT_MINUTES} 分钟内任务状态未变为已完成，按失败计`
+      : `已尝试点击入口，但未捕获埋点上报，${WAIT_MINUTES} 分钟内任务状态未完成，按失败计`,
   };
 }

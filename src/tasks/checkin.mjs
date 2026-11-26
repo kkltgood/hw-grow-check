@@ -1,4 +1,5 @@
 import { doSign, getPoints, getSignStreak, getSignStatus } from "../api.mjs";
+import { RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "../wait.mjs";
 
 export const meta = {
   id: "checkin",
@@ -7,31 +8,37 @@ export const meta = {
   cycle: "DAILY",
   // 纯接口调用，不需要真实用户交互
   safe: true,
+  // 内部最多等 5 分钟检查结果，外层超时留 1 分半余量
+  timeoutMs: RESULT_WAIT_MS + 90_000,
 };
 
 /**
- * 平台侧临时故障，重试几次通常就过去了：
+ * 平台侧临时故障，等一会儿通常就恢复：
  * 40004 / GATEWAY_CONNECT_FAILED（网关连不上实名服务）、服务暂不可用、超时、网关错误页。
- * 这类错误不该在第一次就把整天判成「签到失败」。
+ * 这类错误不该在第一次失败时就把这一天判死。
  */
 const TRANSIENT = /GATEWAY_CONNECT_FAILED|实名服务不可用|服务暂不可用|系统繁忙|try again|timeout|超时|bad-json|http-5\d\d/i;
-const RETRY_WAIT_MS = [3000, 8000];
 
-/** 签到失败时按退避重试；业务错误（今天已签、参数错）不重试，免得白等 */
-async function signWithRetry(page, log) {
+/** 重试节奏：前几次快一点，之后每 30 秒一次，直到 5 分钟预算用完 */
+const RETRY_STEPS_MS = [5_000, 15_000, 30_000];
+const nextWait = (attempt) => RETRY_STEPS_MS[Math.min(attempt - 1, RETRY_STEPS_MS.length - 1)];
+
+/**
+ * 签到接口调用 + 临时错误重试，与结果确认共用同一个 5 分钟预算。
+ * 40004 是华为云侧实名服务连不上，实测过几分钟自己就恢复了，
+ * 所以这里按 5s / 15s / 30s… 一直重试到预算用完，而不是重试两次就放弃。
+ */
+async function signUntilDeadline(page, log, deadline) {
   let res = await doSign(page);
-  let tries = 1;
-  for (let i = 0; i < RETRY_WAIT_MS.length; i++) {
-    if (res.ok || res.loginExpired || !TRANSIENT.test(res.detail || "")) break;
-    const ms = RETRY_WAIT_MS[i];
-    log?.(`签到接口临时异常（${res.detail}），${ms / 1000} 秒后重试 ${i + 1}/${RETRY_WAIT_MS.length}`);
-    await page.waitForTimeout(ms);
+  let attempts = 1;
+  while (!res.ok && !res.loginExpired && Date.now() < deadline && TRANSIENT.test(res.detail || "")) {
+    const wait = Math.max(0, Math.min(nextWait(attempts), deadline - Date.now()));
+    log?.(`签到第 ${attempts} 次没成功（${res.detail}），${Math.round(wait / 1000)} 秒后重试`);
+    await page.waitForTimeout(wait);
     res = await doSign(page);
-    tries += 1;
+    attempts += 1;
   }
-  // 重试过仍失败：把「已经试过几次」带进 detail，邮件里能说清楚不是没管它
-  if (!res.ok && tries > 1) res = { ...res, detail: `${res.detail}；已自动重试 ${tries - 1} 次` };
-  return res;
+  return { res, attempts };
 }
 
 /**
@@ -40,32 +47,36 @@ async function signWithRetry(page, log) {
  * 新版接口把「签到」做成了一次任务完成：POST /user/sign-in 返回
  * { success, points, total_points, signed }。points=0 表示今天已经签过。
  *
+ * 返回前必须等到成长中心把任务状态翻成「已完成」，最多等 5 分钟；
+ * 等不到且积分也没增加，按失败返回（daily.sh 会发失败邮件）。
+ *
  * @returns {{status: 'signed'|'already'|'failed', detail: string, points?: number}}
  */
 export async function run({ page, log }) {
+  const deadline = Date.now() + RESULT_WAIT_MS;
   const before = await getSignStatus(page);
   if (before.error === "not-login") {
     return { status: "failed", detail: "登录态失效（未登录）" };
   }
-
   // 状态查不到不等于不能签：sign-in 是幂等的，points=0 就说明今天已经签过。
-  // 新版网关偶尔会把正常会话判成 401，这条兜底能少丢一天。
   if (before.error) log?.(`签到状态查询失败（${before.error}），直接尝试签到`);
 
+  const pointsBefore = await getPoints(page).catch(() => null);
+
   if (!before.error && before.signedToday) {
-    const points = await getPoints(page).catch(() => null);
     const streak = await getSignStreak(page).catch(() => null);
     return {
       status: "already",
-      detail: `今日已签到${streak ? `（连续 ${streak} 天）` : ""}，当前 ${points ?? "?"} 分`,
-      points,
+      detail: `今日已签到${streak ? `（连续 ${streak} 天）` : ""}，当前 ${pointsBefore ?? "?"} 分`,
+      points: pointsBefore,
     };
   }
 
-  const res = await signWithRetry(page, log);
+  const { res, attempts } = await signUntilDeadline(page, log, deadline);
   if (!res.ok) {
     if (res.loginExpired) return { status: "failed", detail: "登录态失效，需重新登录" };
-    return { status: "failed", detail: res.detail };
+    const tried = attempts > 1 ? `；${WAIT_MINUTES} 分钟内重试 ${attempts - 1} 次仍未成功` : "";
+    return { status: "failed", detail: `${res.detail}${tried}` };
   }
 
   const points = res.total ?? (await getPoints(page).catch(() => null));
@@ -81,21 +92,40 @@ export async function run({ page, log }) {
   }
 
   // 复查状态，确认真的签上了（POST 成功不等于任务状态已翻转）
-  await page.waitForTimeout(1200);
-  const after = await getSignStatus(page).catch(() => ({ error: "unknown" }));
+  const confirm = await waitForResult({
+    page,
+    log,
+    label: "签到结果",
+    timeoutMs: Math.max(5_000, deadline - Date.now()),
+    check: async () => {
+      const st = await getSignStatus(page);
+      if (st.error) return { done: false, error: st.error };
+      return { done: st.signedToday === true };
+    },
+  });
+
   const gained = res.gained || before.bonusPerDay || meta.bonus;
 
-  if (after.error) {
-    // POST 已经成功，只是复查接口抽风，别把这次记成失败
+  if (!confirm.ok) {
+    // 状态接口一直不翻转时，以「积分是否真的增加」兜底，避免把已到账的一天记成失败
+    const credited = points != null && pointsBefore != null && points - pointsBefore >= meta.bonus;
+    if (credited) {
+      log?.(`任务状态 ${WAIT_MINUTES} 分钟内没翻转，但积分已 +${points - pointsBefore}，按成功记`);
+      return {
+        status: "signed",
+        detail: `签到成功（+${points - pointsBefore} 分${streakText}）；任务状态确认超时，按积分判定`,
+        points,
+      };
+    }
     return {
-      status: "signed",
-      detail: `签到成功（+${gained} 分${streakText}），但复查失败（${after.error}）`,
+      status: "failed",
+      detail: `签到接口返回成功，但 ${WAIT_MINUTES} 分钟内成长中心未确认（${
+        confirm.last?.error || "任务状态未翻转"
+      }）`,
       points,
     };
   }
-  if (after.signedToday) {
-    log?.(`签到成功：+${gained} 分${streakText}，当前 ${points ?? "?"} 分`);
-    return { status: "signed", detail: `签到成功（+${gained} 分${streakText}）`, points };
-  }
-  return { status: "failed", detail: "POST 返回成功但复查仍未签到", points };
+
+  log?.(`签到成功：+${gained} 分${streakText}，当前 ${points ?? "?"} 分`);
+  return { status: "signed", detail: `签到成功（+${gained} 分${streakText}）`, points };
 }
