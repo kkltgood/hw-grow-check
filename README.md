@@ -39,7 +39,7 @@ Star 类任务只做「加 Star」，从不取消；仓库池空了会停止请�
 每次运行结束会收到这样一封结果邮件，签到结果、积分变化、近 7 天曲线和完整任务清单都在里面，Star 那两行还会显示当前进度（图中 6/73、7/31）：
 
 <p align="center">
-  <img src="docs/mail-preview/checkin-success.png" width="604" alt="华为云开发者成长中心签到成功邮件截图：签到 +10 分，当前积分 1030，今日累计 +80，任务清单 6/9 完成，Star 进度 6/73 与 7/31">
+  <img src="docs/mail-preview/checkin-success.png" width="604" alt="华为云开发者成长中心签到成功邮件截图：签到 +10 分、连续签到 4 天，当前积分 1030，今日累计 +80，任务清单 6/9 完成，Star 进度 6/73 与 7/31">
 </p>
 
 失败、告警和补签提醒的样子见 [`docs/mail-preview/`](docs/mail-preview/)。

@@ -69,6 +69,8 @@ export async function run({ page, log }) {
       status: "already",
       detail: `今日已签到${streak ? `（连续 ${streak} 天）` : ""}，当前 ${pointsBefore ?? "?"} 分`,
       points: pointsBefore,
+      // 单独存一份，邮件不必再从 detail 文案里正则解析
+      streak,
     };
   }
 
@@ -88,6 +90,7 @@ export async function run({ page, log }) {
       status: "already",
       detail: `今日已签到${streakText}，当前 ${points ?? "?"} 分`,
       points,
+      streak,
     };
   }
 
@@ -115,6 +118,7 @@ export async function run({ page, log }) {
         status: "signed",
         detail: `签到成功（+${points - pointsBefore} 分${streakText}）；任务状态确认超时，按积分判定`,
         points,
+        streak,
       };
     }
     return {
@@ -127,5 +131,5 @@ export async function run({ page, log }) {
   }
 
   log?.(`签到成功：+${gained} 分${streakText}，当前 ${points ?? "?"} 分`);
-  return { status: "signed", detail: `签到成功（+${gained} 分${streakText}）`, points };
+  return { status: "signed", detail: `签到成功（+${gained} 分${streakText}）`, points, streak };
 }

@@ -136,7 +136,7 @@ const tasks = withStarProgress(
 const signBonus = Number((tasks.find((m) => /签到/.test(m.title || "")) || {}).bonus) || 10;
 
 const detail = checkin?.detail || (todayState ? "已签到" : "已完成（未见今日记录）");
-const streak = Number((detail.match(/连续\s*(\d+)\s*天/) || [])[1] || 0);
+const streak = Number(checkin?.streak || (detail.match(/连续\s*(\d+)\s*天/) || [])[1] || 0);
 const perDay = Number((detail.match(/\+(\d+)/) || [])[1] || 0);
 
 const brand = `${md} · ${weekday}`;
@@ -271,14 +271,20 @@ if (REMIND) {
     <div>
       ${statPair(
         statCard("当前积分", pts, "分", delta != null && delta > 0 ? `今日累计 +${delta}` : "与上次记录持平"),
-        gained
-          ? statCard("本次获得", `+${signGained}`, "分", `每日基础 +${signBonus}`, T.amber)
-          : statCard("连续签到", streak || "—", "天", "断签会重新计数"),
+        // 连续签到单独一块：这是唯一会「断」的指标，比单次加分更值得盯
+        statCard(
+          "连续签到",
+          streak || "—",
+          "天",
+          streak ? "断签会重新计数" : "暂无连续记录",
+          T.amber,
+        ),
       )}
     </div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:18px">
       ${row("执行时间", `${md} ${hhmmAt(s.at) || hhmm}`)}
-      ${row("会话状态", "有效")}
+      ${row("本次签到", gained ? `+${signGained} 分` : "今日已签", gained ? T.amber : T.ink)}
+      ${row("登录状态", "有效")}
       ${row("下次执行", `明天 ${RUN_AT}`)}
     </table>
     ${chartBlock}
