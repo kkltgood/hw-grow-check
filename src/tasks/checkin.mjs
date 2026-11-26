@@ -10,6 +10,31 @@ export const meta = {
 };
 
 /**
+ * 平台侧临时故障，重试几次通常就过去了：
+ * 40004 / GATEWAY_CONNECT_FAILED（网关连不上实名服务）、服务暂不可用、超时、网关错误页。
+ * 这类错误不该在第一次就把整天判成「签到失败」。
+ */
+const TRANSIENT = /GATEWAY_CONNECT_FAILED|实名服务不可用|服务暂不可用|系统繁忙|try again|timeout|超时|bad-json|http-5\d\d/i;
+const RETRY_WAIT_MS = [3000, 8000];
+
+/** 签到失败时按退避重试；业务错误（今天已签、参数错）不重试，免得白等 */
+async function signWithRetry(page, log) {
+  let res = await doSign(page);
+  let tries = 1;
+  for (let i = 0; i < RETRY_WAIT_MS.length; i++) {
+    if (res.ok || res.loginExpired || !TRANSIENT.test(res.detail || "")) break;
+    const ms = RETRY_WAIT_MS[i];
+    log?.(`签到接口临时异常（${res.detail}），${ms / 1000} 秒后重试 ${i + 1}/${RETRY_WAIT_MS.length}`);
+    await page.waitForTimeout(ms);
+    res = await doSign(page);
+    tries += 1;
+  }
+  // 重试过仍失败：把「已经试过几次」带进 detail，邮件里能说清楚不是没管它
+  if (!res.ok && tries > 1) res = { ...res, detail: `${res.detail}；已自动重试 ${tries - 1} 次` };
+  return res;
+}
+
+/**
  * 签到。幂等：今天签过就直接返回 already。
  *
  * 新版接口把「签到」做成了一次任务完成：POST /user/sign-in 返回
@@ -37,7 +62,7 @@ export async function run({ page, log }) {
     };
   }
 
-  const res = await doSign(page);
+  const res = await signWithRetry(page, log);
   if (!res.ok) {
     if (res.loginExpired) return { status: "failed", detail: "登录态失效，需重新登录" };
     return { status: "failed", detail: res.detail };

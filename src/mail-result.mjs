@@ -40,6 +40,9 @@ import {
 const TZ = "Asia/Shanghai";
 /** 补跑命令：默认按仓库实际位置生成，也可用 GROW_DAILY_CMD 覆盖 */
 const DAILY_CMD = process.env.GROW_DAILY_CMD || `bash "${join(ROOT, "scripts/daily.sh")}"`;
+/** 只补签到：登录态还在时用这条，不用再扫一次码 */
+const RETRY_CMD =
+  process.env.GROW_RETRY_CMD || `cd "${ROOT}" && GROW_TASKS=checkin node src/cli.mjs run`;
 const args = process.argv.slice(2);
 const OK = args.includes("--ok");
 const REMIND = args.includes("--remind");
@@ -128,6 +131,8 @@ const pendingSum = pending.reduce((a, m) => a + (m.bonus || 0), 0);
 const tasks = withStarProgress(
   Array.isArray(s.tasks) && s.tasks.length ? s.tasks : pending.map((m) => ({ ...m, done: false })),
 );
+/** 签到值多少分：优先取任务清单，读不到按 10 分，用于「0 / 10」这类文案 */
+const signBonus = Number((tasks.find((m) => /签到/.test(m.title || "")) || {}).bonus) || 10;
 
 const detail = checkin?.detail || (todayState ? "已签到" : "已完成（未见今日记录）");
 const streak = Number((detail.match(/连续\s*(\d+)\s*天/) || [])[1] || 0);
@@ -286,54 +291,131 @@ if (REMIND) {
     footer: footerText(`下次执行：明天 ${RUN_AT}`),
   });
 } else {
-  const reason = REASON || "未知（详见日志）";
   /**
-   * 会话到底有没有挂，看退出码：2 是「登录成功但签到失败」，1/3/4 才是登录或环境问题，
-   * 不认识的情况不硬下结论，写「未确认」。
+   * 失败邮件只说人话：发生了什么、要不要我管、怎么补。
+   *
+   * 以前药丸和标题直接写「退出码 2」——那是给脚本看的，收件人看到只会更困惑。
+   * 现在按原因分三种：平台临时故障（橙色、等它恢复）/ 登录失效（红色、要扫码）/
+   * 其他签到失败（红色、可手动补）。技术细节只保留「失败环节」一行。
    */
-  const failSession = () => {
-    if (CODE === "2") return { text: "有效（签到未成功）", color: T.ink };
-    if (["1", "3", "4"].includes(CODE)) return { text: "已失效", color: T.red };
-    return { text: "未确认", color: T.muted };
-  };
-  subject = `❌ 华为云签到失败 · ${md}${CODE ? ` · 退出码 ${CODE}` : ""}`;
+  const rawReason = REASON || "未知（详见日志）";
+  const apiDetail = todayState ? checkin?.detail || "" : "";
 
+  /** 接口原始报错 → 一句人话 */
+  const humanize = (text) => {
+    if (!text) return "";
+    if (/GATEWAY_CONNECT_FAILED|实名服务不可用|40004/.test(text)) {
+      return "华为云侧的实名服务暂时连不上（网关连接失败），不是你的账号问题";
+    }
+    if (/超时|timeout/i.test(text)) return "签到接口响应超时，多半是网络一时抖动";
+    if (/登录态|未登录|401|10001/.test(text)) return "登录态已失效，需要重新登录";
+    if (/bad-json|http-5\d\d/i.test(text)) return "签到接口返回了网关错误页";
+    return text.replace(/（api-error）/, "").replace(/^签到接口异常/, "签到接口报错");
+  };
+
+  const platformIssue = /GATEWAY_CONNECT_FAILED|实名服务不可用|40004|timeout|超时|bad-json|http-5\d\d/i.test(
+    apiDetail,
+  );
+  const loginIssue = ["1", "3", "4"].includes(CODE);
+  const needScan = loginIssue; // 只有登录类问题才需要重新扫码
+
+  const fail = platformIssue
+    ? {
+        tone: "warn",
+        title: "签到没成功",
+        badge: "平台临时异常",
+        subtitle: `${humanize(apiDetail)}；不用重新登录，等平台缓过来补一次就行`,
+        stage: "签到接口（平台侧异常）",
+        session: "正常",
+        sessionColor: T.green,
+        subject: `⚠️ 华为云签到没成功 · ${md} · 平台临时故障，可补签`,
+      }
+    : loginIssue
+      ? {
+          tone: "fail",
+          title: "今天没登录上",
+          badge: "需要重新登录",
+          subtitle: rawReason,
+          stage: CODE === "1" ? "扫码登录（超时）" : "登录环节",
+          session: "已失效",
+          sessionColor: T.red,
+          subject: `❌ 华为云签到失败 · ${md} · 需要重新登录`,
+        }
+      : {
+          tone: "fail",
+          title: "签到没成功",
+          badge: "签到未完成",
+          subtitle: humanize(apiDetail) || rawReason,
+          stage: apiDetail ? "签到接口" : "运行过程",
+          session: apiDetail ? "正常" : "未确认",
+          sessionColor: apiDetail ? T.green : T.muted,
+          subject: `❌ 华为云签到没成功 · ${md} · 可手动补签`,
+        };
+
+  const codeStyle = `display:block;margin-top:6px;background:#fff;border:1px solid ${T.line};
+    padding:7px 10px;border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:11px;
+    line-height:1.9;color:${T.ink};word-break:break-all`;
+  /** 长命令拆成两行，比用 && 串起来好读，也不会顶出提示框 */
+  const retryCmdHtml = `cd &quot;${esc(ROOT)}&quot;<br>GROW_TASKS=checkin node src/cli.mjs run`;
+
+  subject = fail.subject;
   lines = [
-    `原因：${reason}`,
+    `原因：${fail.subtitle}`,
     `时间：${day} ${hhmm}（${weekday}）`,
-    `影响：今天没有签到，积分不会增加`,
-    `处理：本机执行 ${DAILY_CMD} 补一次`,
+    `影响：今天这 ${signBonus} 分还没到账`,
+    `处理：${needScan ? `本机执行 ${DAILY_CMD} 扫码补签` : `重跑签到：${RETRY_CMD}`}`,
   ];
+
+  const fixBlock = needScan
+    ? notice(
+        T.red,
+        "怎么补（要扫一次码）",
+        `在本机终端执行<br>
+         <code style="${codeStyle}">${esc(DAILY_CMD)}</code>
+         <span style="display:block;margin-top:7px;color:${T.muted}">浏览器会弹出来等你扫码，扫完自动补签。</span>`,
+        { bg: T.redBg },
+      )
+    : notice(
+        T.orange,
+        "怎么补（约 10 秒，不用扫码）",
+        `${platformIssue ? "登录态还在，平台恢复后" : ""}重跑一次签到就行：<br>
+         <code style="${codeStyle}">${retryCmdHtml}</code>
+         <span style="display:block;margin-top:7px;color:${T.muted}">也可以打开成长中心，手点一下「签到」，这 ${signBonus} 分同样会到账。</span>`,
+        { bg: T.orangeBg },
+      );
 
   const body = `
     <div>
       ${statPair(
-        statCard("今日积分", "0", "分", "今天这 10 分没拿到", T.red),
-        statCard("当前积分", s.pointsAfter ?? "?", "分", s.pointsAfter != null ? "最近记录" : "暂无数据"),
+        statCard("签到得分", "0", `/ ${signBonus} 分`, "今天这次没加上", T.red),
+        statCard(
+          "当前积分",
+          s.pointsAfter ?? "?",
+          "分",
+          !todayState
+            ? "上次记录，今天没取到最新"
+            : delta != null && delta > 0
+              ? `其他任务 +${delta} 已到账`
+              : s.pointsAfter != null
+                ? "最近记录"
+                : "暂无数据",
+        ),
       )}
     </div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:18px">
       ${row("发生时间", `${md} ${hhmm}`)}
-      ${row("会话状态", failSession().text, failSession().color)}
+      ${row("登录状态", fail.session, fail.sessionColor)}
+      ${row("失败环节", `<span style="font-weight:400;color:${T.muted}">${esc(fail.stage)}</span>`)}
     </table>
-    ${notice(
-      T.red,
-      "怎么补",
-      `在本机终端执行<br>
-       <code style="display:inline-block;margin-top:6px;background:#fff;border:1px solid ${T.line};
-         padding:6px 10px;border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:11px;
-         color:${T.ink}">${esc(DAILY_CMD)}</code><br>
-       <span style="color:${T.muted}">浏览器会弹出等你扫码，扫完自动补签。</span>`,
-      { bg: T.redBg },
-    )}`;
+    ${fixBlock}`;
 
   html = shell({
     band: band({
-      tone: "fail",
+      tone: fail.tone,
       right: brand,
-      title: "签到失败",
-      subtitle: esc(reason),
-      badge: bandPill(CODE ? `退出码 ${CODE}` : "未签到"),
+      title: fail.title,
+      subtitle: esc(fail.subtitle),
+      badge: bandPill(fail.badge),
     }),
     body,
     footer: footerText(`下次执行：明天 ${RUN_AT}`),

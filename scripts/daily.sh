@@ -65,7 +65,7 @@ LOGIN=$?
 
 if [ "$LOGIN" -ne 0 ]; then
   log "登录未完成（退出码 ${LOGIN}），跳过签到"
-  send_result --fail --code "$LOGIN" --reason "扫码登录未完成（等待 10 分钟超时或登录失败）"
+  send_result --fail --code "$LOGIN" --reason "等了 10 分钟没有完成扫码登录，今天还没签上"
   notify "没有扫码" "今天未签到，可手动执行 scripts/daily.sh"
   log "=== 结束（未登录）==="
   exit "$LOGIN"
@@ -83,7 +83,7 @@ if [ "$CODE" -eq 0 ]; then
   exit 0
 fi
 
-send_result --fail --code "$CODE" --reason "登录成功但签到失败（退出码 $CODE）"
-notify "签到失败" "退出码 $CODE，详见日志"
+send_result --fail --code "$CODE" --reason "登录正常，但签到这一步没完成（平台接口临时异常时可重跑一次）"
+notify "今天没签上" "邮件里有原因和补救方法"
 log "=== 结束（签到失败）==="
 exit "$CODE"
