@@ -13,11 +13,10 @@ import { join } from "node:path";
 import { getUserTasks } from "./api.mjs";
 import { config } from "./config.mjs";
 import { getGitcodeUser, listStarredRepos, readGitcodeConfig, starRepo } from "./gitcode.mjs";
-import { RESULT_POLL_MS, RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "./wait.mjs";
+import { SETTLE_MINUTES, SETTLE_WAIT_MS, waitForResult } from "./wait.mjs";
 
-const POLL_INTERVAL_MS = RESULT_POLL_MS;
-/** Star 之后要等成长中心的外部校验，最多 5 分钟，超时按失败返回 */
-const SETTLE_TIMEOUT_MS = RESULT_WAIT_MS;
+/** Star 之后要等成长中心的外部校验，最多 10 分钟（平台结算偶尔要 6-8 分钟） */
+const SETTLE_TIMEOUT_MS = SETTLE_WAIT_MS;
 const norm = (s) => (s || "").replace(/\s+/g, "");
 
 /** 周期键：日任务用 YYYY-MM-DD，周任务用本周周一的日期 */
@@ -156,7 +155,7 @@ export async function runStarTask({ page, log, task, loadPool }) {
 
   /**
    * 等成长中心把任务标记完成。Star 只是把仓库加到了 GitCode，
-   * 分数要等平台的外部校验跑完才到账，所以必须等到状态翻转，最多 5 分钟。
+   * 分数要等平台的外部校验跑完才到账，所以必须等到状态翻转，最多 10 分钟。
    */
   const settle = () =>
     waitForResult({
@@ -164,7 +163,6 @@ export async function runStarTask({ page, log, task, loadPool }) {
       log,
       label: `${task.title}结算`,
       timeoutMs: SETTLE_TIMEOUT_MS,
-      intervalMs: POLL_INTERVAL_MS,
       check: async () => {
         const after = await getUserTasks(page).catch(() => ({ missions: [] }));
         return { done: Boolean(findMission(after.missions, task)?.done) };
@@ -173,16 +171,20 @@ export async function runStarTask({ page, log, task, loadPool }) {
 
   const state = readState(file);
   if (state.pending?.repo && state.pending.period === period) {
-    log?.(`${periodName}已 Star ${state.pending.repo}，等成长中心补确认（最多 ${WAIT_MINUTES} 分钟）`);
+    log?.(`${periodName}已 Star ${state.pending.repo}，等成长中心补确认（最多 ${SETTLE_MINUTES} 分钟）`);
     const r = await settle();
     if (r.ok) {
       writeState(file, { pending: null, last: { ...state.pending, settled: true } });
       log?.(`上一条 Star 已结算，+${task.bonus} 分`);
       return { status: "signed", detail: `${periodName}已 Star ${state.pending.repo}，+${task.bonus} 分（补确认成功）` };
     }
+    /**
+     * 超时不再记 failed：Star 动作已经发出去了，分数只是晚到，记成失败会发一封
+     * 看着像出错的邮件（11-26、11-27 连续两天都是这么误报的）。
+     */
     return {
-      status: "failed",
-      detail: `${periodName}已 Star ${state.pending.repo}，但 ${WAIT_MINUTES} 分钟内成长中心仍未确认，按失败计；不会重复 Star`,
+      status: "delayed",
+      detail: `${periodName}已 Star ${state.pending.repo}，成长中心还没结算（超过 ${SETTLE_MINUTES} 分钟）；分数只会晚到，不会重复 Star`,
     };
   }
 
@@ -243,7 +245,7 @@ export async function runStarTask({ page, log, task, loadPool }) {
   }
 
   return {
-    status: "failed",
-    detail: `已 Star ${pick.fullName}（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}），但 ${WAIT_MINUTES} 分钟内成长中心未确认，按失败计；${periodName}不会重复 Star`,
+    status: "delayed",
+    detail: `已 Star ${pick.fullName}（${task.poolLabel} ${afterStar.starred}/${afterStar.poolSize}），成长中心还没结算（超过 ${SETTLE_MINUTES} 分钟）；分数只会晚到，${periodName}不会重复 Star`,
   };
 }

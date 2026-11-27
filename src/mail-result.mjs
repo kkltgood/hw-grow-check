@@ -121,7 +121,10 @@ const checkin = todayState ? (s.results || []).find((r) => r.id === "checkin") :
 const starResults = todayState
   ? (s.results || []).filter((r) => r.id === "star" || r.id === "star-weekly")
   : [];
-const starAttention = starResults.filter((r) => !["signed", "already"].includes(r.status));
+/** delayed：动作已做完、平台还没结算 —— 不是失败，只是分数晚到（Star / 鸿蒙 / DevSpace 都可能有） */
+const delayedResults = todayState ? (s.results || []).filter((r) => r.status === "delayed") : [];
+/** 真正没做成的（配置缺失、登录失效等），才需要人管 */
+const starAttention = starResults.filter((r) => !["signed", "already", "delayed"].includes(r.status));
 const delta = s.pointsBefore != null && s.pointsAfter != null ? s.pointsAfter - s.pointsBefore : null;
 const pending = s.pending || [];
 const pendingSum = pending.reduce((a, m) => a + (m.bonus || 0), 0);
@@ -249,7 +252,10 @@ if (REMIND) {
             ? delta > signGained
               ? `（签到 +${signGained}，今日累计 +${delta}）`
               : `（+${signGained}）`
-            : "（无变化）"
+            : // 今天已经签过、但其他任务还在加分：不能写成「无变化」
+              delta > 0
+              ? `（今日累计 +${delta}）`
+              : "（无变化）"
         }`
       : String(pts);
 
@@ -261,9 +267,23 @@ if (REMIND) {
   const starNote = starAttention.length
     ? notice(
         T.orange,
-        "Star 任务提醒",
+        "Star 任务需要看一眼",
         starAttention.map((r) => esc(`${r.title}：${r.detail}`)).join("<br>"),
         { bg: T.orangeBg },
+      )
+    : "";
+
+  /**
+   * 延迟结算不是故障：Star / 鸿蒙 / DevSpace 的动作都做完了，只是平台还没记分。
+   * 单独用绿色提示说清楚，免得收件人把它当成失败去重跑。
+   */
+  const delayNote = delayedResults.length
+    ? notice(
+        T.green,
+        "已执行，等平台结算",
+        `${delayedResults.map((r) => esc(`${r.title}：${r.detail}`)).join("<br>")}
+         <span style="display:block;margin-top:6px;color:${T.muted}">分数只会晚到、不会丢，明天任务页会显示已完成，不用重跑。</span>`,
+        { bg: T.greenBg },
       )
     : "";
 
@@ -289,10 +309,12 @@ if (REMIND) {
     </table>
     ${chartBlock}
     ${tasksBlock(tasks)}
+    ${delayNote}
     ${starNote}`;
 
   lines = [`结果：${detail}`, `积分：${pointsText}`, `时间：${day} ${hhmm}（${weekday}）`];
   if (starAttention.length) lines.push(...starAttention.map((r) => `${r.title}：${r.detail}`));
+  if (delayedResults.length) lines.push(...delayedResults.map((r) => `${r.title}：${r.detail}`));
   if (tasks.length) {
     const doneCount = tasks.filter((m) => m.done === true).length;
     lines.push(`任务：已完成 ${doneCount}/${tasks.length} 项，待领 +${pendingSum} 分（需人工）`);
@@ -304,7 +326,7 @@ if (REMIND) {
       right: brand,
       title: title,
       subtitle: esc(subtitle),
-      badge: bandPill(gained ? `+${signGained} 分` : "无变化"),
+      badge: bandPill(gained ? `+${signGained} 分` : delta > 0 ? `今日 +${delta}` : "无变化"),
     }),
     body,
     footer: footerText(`下次执行：明天 ${RUN_AT}`),
@@ -350,13 +372,13 @@ if (REMIND) {
   const fail = otherTasks
     ? {
         tone: "warn",
-        title: "签到成功，任务没确认",
-        badge: "任务待确认",
-        subtitle: `${failedTasks.map((r) => r.title).join("、")} 没在 ${WAIT_MINUTES} 分钟内等到成长中心确认；签到本身已成功，${signBonus} 分已到账`,
+        title: "签到成功，有任务没跑完",
+        badge: "任务未完成",
+        subtitle: `${failedTasks.map((r) => r.title).join("、")} 这次没跑完；签到本身已成功，${signBonus} 分已到账，明天会照常重试`,
         stage: failedTasks[0].title,
         session: "正常",
         sessionColor: T.green,
-        subject: `⚠️ 华为云签到成功 · ${md} · ${failedTasks.length} 个任务未确认`,
+        subject: `⚠️ 华为云签到成功 · ${md} · ${failedTasks.length} 个任务没跑完`,
       }
     : platformIssue
     ? {
@@ -402,11 +424,11 @@ if (REMIND) {
     `原因：${fail.subtitle}`,
     `时间：${day} ${hhmm}（${weekday}）`,
     otherTasks
-      ? `影响：签到分已到账，这 ${failedTasks.length} 项还没确认：${failedTasks.map((r) => r.title).join("、")}`
+      ? `影响：签到分已到账，这 ${failedTasks.length} 项还没跑完：${failedTasks.map((r) => r.title).join("、")}`
       : `影响：今天这 ${signBonus} 分还没到账`,
     `处理：${
       otherTasks
-        ? `重跑未确认的任务：cd "${ROOT}" && GROW_TASKS=${retryIds.join(",")} node src/cli.mjs run`
+        ? `重跑没跑完的任务：cd "${ROOT}" && GROW_TASKS=${retryIds.join(",")} node src/cli.mjs run`
         : needScan
           ? `本机执行 ${DAILY_CMD} 扫码补签`
           : `重跑签到：${RETRY_CMD}`
@@ -417,7 +439,7 @@ if (REMIND) {
     ? notice(
         T.orange,
         "怎么补（约 10 秒，不用扫码）",
-        `签到已经完成，只有上面这项还在等平台确认。重跑这些任务即可：<br>
+        `签到已经完成，只有上面这项没跑完。重跑这些任务即可：<br>
          <code style="${codeStyle}">cd &quot;${esc(ROOT)}&quot;<br>GROW_TASKS=${esc(
            retryIds.join(","),
          )} node src/cli.mjs run</code>

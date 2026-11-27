@@ -7,7 +7,7 @@
  */
 import { fetchPracticeRepos } from "../gitcode.mjs";
 import { runStarTask } from "../star-runner.mjs";
-import { RESULT_WAIT_MS } from "../wait.mjs";
+import { SETTLE_WAIT_MS } from "../wait.mjs";
 
 export const meta = {
   id: "star-weekly",
@@ -16,8 +16,8 @@ export const meta = {
   cycle: "WEEKLY",
   safe: true,
   note: "从 agent-best-practices 组织挑一个没 Star 过的仓库，用 GitCode 令牌 Star",
-  // 内部最多等 5 分钟结算，外层超时留余量
-  timeoutMs: RESULT_WAIT_MS + 90_000,
+  // 内部最多等 10 分钟结算，外层超时留余量
+  timeoutMs: SETTLE_WAIT_MS + 90_000,
 };
 
 export async function run({ page, log }) {

@@ -6,12 +6,12 @@
  *   - 点「前往AI DevSpace实践」→ POST /api/track/aishell_click（这个才是任务完成信号）
  *
  * 所以流程是「打开页面 → 点入口 → 等埋点 200 → 回查任务状态」。
- * 埋点成功不等于立刻结算，后面最多等 5 分钟；超时按失败返回，
+ * 埋点成功不等于立刻结算，后面最多等 10 分钟；超时记「延迟结算」而不是失败，
  * 不再用 pending 含糊过去（页面上找不到入口这类前置问题仍记 pending）。
  */
 import { getUserTasks } from "../api.mjs";
 import { URLS } from "../config.mjs";
-import { RESULT_WAIT_MS, WAIT_MINUTES, waitForResult } from "../wait.mjs";
+import { SETTLE_MINUTES, SETTLE_WAIT_MS, waitForResult } from "../wait.mjs";
 
 export const meta = {
   id: "devspace",
@@ -21,8 +21,8 @@ export const meta = {
   cycle: "DAILY",
   safe: false,
   note: "打开实践中心并点击「前往AI DevSpace实践」，等埋点上报后回查任务状态",
-  // 埋点后最多等 5 分钟结算，外层超时留余量
-  timeoutMs: RESULT_WAIT_MS + 90_000,
+  // 埋点后最多等 10 分钟结算，外层超时留余量
+  timeoutMs: SETTLE_WAIT_MS + 90_000,
 };
 
 const norm = (s) => (s || "").replace(/\s+/g, "");
@@ -98,11 +98,12 @@ export async function run({ context, page, log }) {
     await tab.close().catch(() => {});
   }
 
-  // 回查任务状态：等到真的翻转，最多 5 分钟，超时按失败
+  // 回查任务状态：等到真的翻转，最多 10 分钟，超时记延迟结算
   const settled = await waitForResult({
     page,
     log,
     label: "AI DevSpace 任务",
+    timeoutMs: SETTLE_WAIT_MS,
     check: async () => {
       const after = await getUserTasks(page).catch(() => ({ missions: [] }));
       return { done: Boolean(findMission(after.missions || [], meta.title)?.done) };
@@ -114,9 +115,9 @@ export async function run({ context, page, log }) {
   }
 
   return {
-    status: "failed",
+    status: "delayed",
     detail: clickReported
-      ? `埋点已上报，但 ${WAIT_MINUTES} 分钟内任务状态未变为已完成，按失败计`
-      : `已尝试点击入口，但未捕获埋点上报，${WAIT_MINUTES} 分钟内任务状态未完成，按失败计`,
+      ? `埋点已上报，但 ${SETTLE_MINUTES} 分钟内任务状态还没变成已完成；分数只会晚到，不用重复点`
+      : `已尝试点击入口，但没捕获到埋点上报，${SETTLE_MINUTES} 分钟内任务也未完成；明天可能需要在页面上手动点一次`,
   };
 }
